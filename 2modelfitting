@@ -1,0 +1,171 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy.optimize as opt
+
+# Load 1 CSV files
+print("Loading Phase 1 data tables.")
+summary_df = pd.read_csv("sparc_dirr_sample_summary.csv")
+rc_df = pd.read_csv("sparc_dirr_rotation_curves.csv")
+
+# Define Gravitational Constant and Dark Matter Halo Profiles
+G = 4.30091e-6  # (km/s)^2 * kpc / M_sun
+
+def v_pseudo_isothermal(R, rho_0, R_c):
+    R = np.maximum(R, 1e-4)
+    rho_0_kpc = rho_0 * 1e9  # Convert M_sun/pc^3 to M_sun/kpc^3
+    x = R / R_c
+    v_sq = 4.0 * np.pi * G * rho_0_kpc * (R_c**2) * (1.0 - (1.0 / x) * np.arctan(x))
+    return np.sqrt(np.maximum(0.0, v_sq))
+
+def v_nfw(R, V_200, c):
+    R = np.maximum(R, 1e-4)
+    R_200 = V_200 / 1.0
+    x = R / R_200
+    cx = c * x
+    f_c = np.log(1.0 + c) - (c / (1.0 + c))
+    f_cx = np.log(1.0 + cx) - (cx / (1.0 + cx))
+    v_sq = (V_200**2) * (1.0 / x) * (f_cx / f_c)
+    return np.sqrt(np.maximum(0.0, v_sq))
+
+# Mass Decomposition and Halo Fitting across Sample
+print("Fitting Pseudo-Isothermal (Cored) and NFW (Cuspy) profiles.")
+fit_results = []
+
+err_col = "e_"
+
+for idx, row in summary_df.iterrows():
+    g_name = str(row["galaxy_name"])
+    v_flat = float(row["Vflat"]) if pd.notnull(row["Vflat"]) else 40.0
+
+    gal_rc = rc_df[rc_df["galaxy_name"].astype(str) == g_name].copy()
+
+    if len(gal_rc) < 5:
+        continue
+
+    # SPARC Table 2 columns: "Rad", "Vobs", "Vgas", "Vdisk"
+    R = gal_rc["Rad"].values.astype(float)
+    V_obs = gal_rc["Vobs"].values.astype(float)
+
+    if err_col in gal_rc.columns:
+        err_V = np.maximum(gal_rc[err_col].values.astype(float), 1.0)
+    else:
+        err_V = np.ones_like(V_obs) * 2.0
+
+    V_gas = gal_rc["Vgas"].values.astype(float) if "Vgas" in gal_rc.columns else np.zeros_like(V_obs)
+    V_disk = gal_rc["Vdisk"].values.astype(float) if "Vdisk" in gal_rc.columns else np.zeros_like(V_obs)
+
+    # Baryonic Decomposition: V_baryon^2 = V_gas^2 + V_disk^2
+    V_baryon_sq = (V_gas**2) + (V_disk**2)
+    V_baryon = np.sqrt(np.maximum(0.0, V_baryon_sq))
+
+    # Dark Matter Velocity: V_DM^2 = V_obs^2 - V_baryon^2
+    V_dm_sq = (V_obs**2) - V_baryon_sq
+    V_dm_obs = np.sqrt(np.maximum(0.0, V_dm_sq))
+
+    N_pts = len(R)
+
+    # Fit Cored ISO Profile
+    try:
+        popt_iso, _ = opt.curve_fit(
+            v_pseudo_isothermal,
+            R,
+            V_dm_obs,
+            p0=[0.05, 1.5],
+            bounds=([1e-4, 0.1], [10.0, 30.0]),
+            sigma=err_V,
+            absolute_sigma=True
+        )
+        rho_0_fit, R_c_fit = popt_iso
+        v_model_iso = v_pseudo_isothermal(R, rho_0_fit, R_c_fit)
+        chi2_iso = np.sum(((V_dm_obs - v_model_iso) / err_V)**2)
+        red_chi2_iso = chi2_iso / max(1, N_pts - 2)
+        aic_iso = 4 + N_pts * np.log(max(1e-3, np.sum((V_dm_obs - v_model_iso)**2) / N_pts))
+    except Exception:
+        rho_0_fit, R_c_fit, red_chi2_iso, aic_iso = np.nan, np.nan, np.nan, np.nan
+
+    # Fit Cuspy NFW Profile
+    try:
+        popt_nfw, _ = opt.curve_fit(
+            v_nfw,
+            R,
+            V_dm_obs,
+            p0=[v_flat, 8.0],
+            bounds=([10.0, 1.0], [200.0, 30.0]),
+            sigma=err_V,
+            absolute_sigma=True
+        )
+        V200_fit, c_fit = popt_nfw
+        v_model_nfw = v_nfw(R, V200_fit, c_fit)
+        chi2_nfw = np.sum(((V_dm_obs - v_model_nfw) / err_V)**2)
+        red_chi2_nfw = chi2_nfw / max(1, N_pts - 2)
+        aic_nfw = 4 + N_pts * np.log(max(1e-3, np.sum((V_dm_obs - v_model_nfw)**2) / N_pts))
+    except Exception:
+        V200_fit, c_fit, red_chi2_nfw, aic_nfw = np.nan, np.nan, np.nan, np.nan
+
+    delta_aic = aic_nfw - aic_iso
+
+    fit_results.append({
+        "galaxy_name": g_name,
+        "N_pts": N_pts,
+        "Vflat": v_flat,
+        "rho_0": rho_0_fit,
+        "R_c": R_c_fit,
+        "red_chi2_ISO": red_chi2_iso,
+        "AIC_ISO": aic_iso,
+        "V200": V200_fit,
+        "c_nfw": c_fit,
+        "red_chi2_NFW": red_chi2_nfw,
+        "AIC_NFW": aic_nfw,
+        "delta_AIC": delta_aic,
+        "preferred_model": "ISO (Cored)" if delta_aic > 0 else "NFW (Cuspy)"
+    })
+
+# Save 2 Halo Fit Results to CSV
+fits_df = pd.DataFrame(fit_results)
+fits_df.to_csv("sparc_dirr_phase2_halo_fits.csv", index=False)
+print("Saved halo fit parameters to 'sparc_dirr_phase2_halo_fits.csv'")
+
+# Generate Diagnostic Plots with Log-Log Scale
+plt.figure(figsize=(12, 5))
+
+plt.subplot(1, 2, 1)
+valid_fits = fits_df.dropna(subset=["red_chi2_ISO", "red_chi2_NFW"])
+
+x_vals = np.maximum(valid_fits["red_chi2_NFW"], 0.05)
+y_vals = np.maximum(valid_fits["red_chi2_ISO"], 0.05)
+
+plt.scatter(x_vals, y_vals, color="teal", edgecolors="black", s=60, zorder=3)
+
+min_val = 0.1
+max_val = max(x_vals.max(), y_vals.max()) * 1.5
+
+plt.plot([min_val, max_val], [min_val, max_val], "k--", label="1:1 Line (Equal Fit Quality)")
+
+plt.xscale("log")
+plt.yscale("log")
+
+plt.xlim(min_val, max_val)
+plt.ylim(min_val, max_val)
+
+plt.xlabel("NFW (Cuspy) Reduced Chi-Squared [Log Scale]", fontsize=11)
+plt.ylabel("ISO (Cored) Reduced Chi-Squared [Log Scale]", fontsize=11)
+plt.title("Goodness-of-Fit Comparison", fontsize=12, fontweight="bold")
+plt.legend()
+plt.grid(True, which="both", linestyle="--", alpha=0.4)
+
+plt.subplot(1, 2, 2)
+plt.hist(valid_fits["delta_AIC"].dropna(), bins=10, color="coral", edgecolor="black", alpha=0.85)
+plt.axvline(0, color="black", linestyle="-")
+plt.axvline(2, color="crimson", linestyle="--", label="Strong Preference (delta AIC > 2)")
+plt.xlabel("delta AIC = AIC_NFW - AIC_ISO", fontsize=11)
+plt.ylabel("Number of Galaxies", fontsize=11)
+plt.title("Model Selection: Cored vs Cuspy", fontsize=12, fontweight="bold")
+plt.legend()
+plt.grid(True, linestyle="--", alpha=0.5)
+
+plt.tight_layout()
+plt.savefig("phase2_model_comparison_statistics.png", dpi=200)
+plt.show()
+
+print("Diagnostic plot saved as 'phase2_model_comparison_statistics.png'.")

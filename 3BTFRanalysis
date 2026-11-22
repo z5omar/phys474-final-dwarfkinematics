@@ -1,0 +1,89 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+
+# Load Phase 1 summary dataset
+print("Loading Phase 1 summary dataset.")
+df = pd.read_csv("sparc_dirr_sample_summary.csv")
+
+# Filter for valid non-zero values
+valid_mask = (df["Vflat"] > 0) & (df["m_baryon"] > 0)
+clean_df = df[valid_mask].copy()
+
+# Compute log values for log-log linear fit
+log_v = np.log10(clean_df["Vflat"].values)
+log_m = np.log10(clean_df["m_baryon"].values)
+f_gas = clean_df["f_gas"].values
+
+# Perform Linear Regression: log10(M_baryon) = slope * log10(V_flat) + intercept
+fit_result = linregress(log_v, log_m)
+slope = fit_result.slope
+intercept = fit_result.intercept
+r_value = fit_result.rvalue
+p_value = fit_result.pvalue
+std_err = fit_result.stderr
+
+print("Baryonic Tully-Fisher Relation Fit Results")
+print(f"  Power-law Slope (s): {slope:.3f} +/- {std_err:.3f}")
+print(f"  Intercept (b):       {intercept:.3f}")
+print(f"  R-squared (R^2):     {r_value**2:.3f}")
+
+# Compute BTFR Residuals
+log_m_pred = slope * log_v + intercept
+residuals = log_m - log_m_pred
+
+clean_df["log_vflat"] = log_v
+clean_df["log_mbaryon"] = log_m
+clean_df["btfr_residual"] = residuals
+
+# Check correlation between BTFR residuals and gas fraction (f_gas)
+res_fit = linregress(f_gas, residuals)
+print("Residuals vs Gas Fraction Analysis")
+print(f"  Slope vs f_gas: {res_fit.slope:.4f}")
+print(f"  p-value:        {res_fit.pvalue:.4f} (p > 0.05 indicates no significant dependence on f_gas)")
+
+# Save Results to CSV
+clean_df.to_csv("sparc_dirr_phase3_btfr_results.csv", index=False)
+print("\nSaved BTFR analysis results to 'sparc_dirr_phase3_btfr_results.csv'")
+
+# Plot Phase 3 Diagnostic Figures
+plt.figure(figsize=(12, 5))
+
+# Subplot 1: Baryonic Tully-Fisher Relation
+plt.subplot(1, 2, 1)
+plt.scatter(clean_df["Vflat"], clean_df["m_baryon"], color="royalblue", edgecolors="black", s=60, label="SPARC dIrrs", zorder=3)
+
+v_fit_line = np.linspace(clean_df["Vflat"].min(), clean_df["Vflat"].max(), 100)
+m_fit_line = 10**(intercept) * (v_fit_line**slope)
+
+plt.plot(v_fit_line, m_fit_line, color="crimson", linewidth=2, label=f"Best Fit: $M_{{baryon}} \\propto V_{{flat}}^{{{slope:.2f}}}$")
+
+plt.xscale("log")
+plt.yscale("log")
+plt.xlabel("Flat Circular Velocity $V_{\\mathrm{flat}}$ [km/s]", fontsize=11)
+plt.ylabel("Baryonic Mass $M_{\\mathrm{baryon}}$ [$M_\\odot$]", fontsize=11)
+plt.title("Baryonic Tully-Fisher Relation (BTFR)", fontsize=12, fontweight="bold")
+plt.legend(fontsize=10)
+plt.grid(True, which="both", linestyle="--", alpha=0.4)
+
+# Subplot 2: BTFR Residuals vs Gas Fraction
+plt.subplot(1, 2, 2)
+plt.scatter(f_gas, residuals, color="mediumseagreen", edgecolors="black", s=60, zorder=3)
+plt.axhline(0, color="black", linestyle="--", linewidth=1.5, label="Zero Residual")
+
+f_line = np.linspace(f_gas.min(), f_gas.max(), 100)
+res_line = res_fit.slope * f_line + res_fit.intercept
+plt.plot(f_line, res_line, color="darkgreen", linestyle=":", linewidth=2, label=f"Trend (p = {res_fit.pvalue:.2f})")
+
+plt.xlabel("Gas Fraction $f_{\\mathrm{gas}} = M_{\\mathrm{gas}} / M_{\\mathrm{baryon}}$", fontsize=11)
+plt.ylabel("BTFR Residual $\\Delta \\log M_{\\mathrm{baryon}}$ [dex]", fontsize=11)
+plt.title("BTFR Residuals vs Gas Fraction", fontsize=12, fontweight="bold")
+plt.legend(fontsize=10)
+plt.grid(True, linestyle="--", alpha=0.5)
+
+plt.tight_layout()
+plt.savefig("phase3_btfr_analysis.png", dpi=200)
+plt.show()
+
+print("Plot saved as 'phase3_btfr_analysis.png'.")
